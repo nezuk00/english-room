@@ -1,0 +1,34 @@
+name: Validate MVP
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Create test database
+        run: node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_silent_lifeguard.sql
+      - name: Test server behavior
+        shell: bash
+        run: |
+          node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --port 5190 --inspector-port 0 --var ELEVENLABS_AGENT_ID:agent_synthetic_fixture > /tmp/english-room-worker.log 2>&1 &
+          worker_pid=$!
+          trap 'kill "$worker_pid" || true' EXIT
+          ready=false
+          for attempt in {1..40}; do
+            if curl --fail --silent http://127.0.0.1:5190/api/room > /dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then cat /tmp/english-room-worker.log; exit 1; fi
+          node tests/api-flow.mjs
+          node tests/teacher-flow.mjs
+          node tests/trial-flow.mjs
